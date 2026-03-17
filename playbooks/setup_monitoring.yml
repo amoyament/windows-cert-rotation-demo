@@ -1,0 +1,45 @@
+---
+- name: Setup certificate expiry monitoring on Windows
+  hosts: windows
+  gather_facts: no
+  vars_files:
+    - ../vars/demo_vars.yml
+
+  tasks:
+    - name: Create C:\Scripts directory
+      ansible.windows.win_file:
+        path: C:\Scripts
+        state: directory
+
+    - name: Register CertExpiryCheck event log source
+      ansible.windows.win_shell: |
+        if (-not [System.Diagnostics.EventLog]::SourceExists("CertExpiryCheck")) {
+            New-EventLog -LogName Application -Source "CertExpiryCheck"
+        }
+
+    - name: Deploy certificate monitoring script from template
+      ansible.windows.win_template:
+        src: ../scripts/send_cert_event.ps1.j2
+        dest: C:\Scripts\send_cert_event.ps1
+
+    - name: Create scheduled task for certificate expiry checking
+      community.windows.win_scheduled_task:
+        name: CertExpiryCheck
+        description: "Checks certificate expiry and notifies EDA — managed by Ansible"
+        actions:
+          - path: powershell.exe
+            arguments: "-ExecutionPolicy Bypass -File C:\\Scripts\\send_cert_event.ps1"
+        triggers:
+          - type: registration
+          - type: time
+            repetition:
+              interval: "PT{{ cert_check_interval_minutes }}M"
+              duration: P1Y
+        run_level: highest
+        username: SYSTEM
+        state: present
+        enabled: yes
+
+    - name: Display monitoring setup summary
+      ansible.builtin.debug:
+        msg: "Monitoring scheduled task created — runs every {{ cert_check_interval_minutes }} minutes"

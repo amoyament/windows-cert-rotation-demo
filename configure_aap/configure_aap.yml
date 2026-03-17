@@ -1,0 +1,215 @@
+---
+- name: Configure AAP for Windows certificate rotation demo
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars:
+    controller_hostname: "{{ lookup('env', 'AAP_PROTOCOL') }}://{{ lookup('env', 'AAP_HOSTNAME') }}"
+    controller_username: "{{ lookup('env', 'AAP_USERNAME') }}"
+    controller_password: "{{ lookup('env', 'AAP_PASSWORD') }}"
+    controller_validate_certs: "{{ lookup('env', 'AAP_VALIDATE_CERTS') | default('false') | bool }}"
+
+  pre_tasks:
+    - name: Assert required AAP environment variables are set
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'AAP_HOSTNAME') | length > 0
+          - lookup('env', 'AAP_USERNAME') | length > 0
+          - lookup('env', 'AAP_PASSWORD') | length > 0
+          - lookup('env', 'AAP_PROTOCOL') | length > 0
+        fail_msg: |
+          Missing required AAP environment variables. Please set:
+            export AAP_HOSTNAME="your-aap-url.example.com"
+            export AAP_USERNAME="atrotter"
+            export AAP_PASSWORD="your-password"
+            export AAP_PROTOCOL="http"
+            export AAP_VALIDATE_CERTS="false"
+
+    - name: Assert .env.demo exists
+      ansible.builtin.assert:
+        that: lookup('file', playbook_dir + '/../.env.demo', errors='ignore') | length > 0
+        fail_msg: ".env.demo not found. Run infrastructure/provision_aws.yml first."
+
+    - name: Read WINDOWS_PRIVATE_IP from .env.demo
+      ansible.builtin.shell:
+        cmd: "source {{ playbook_dir }}/../.env.demo && echo $WINDOWS_PRIVATE_IP"
+      register: windows_ip_result
+      changed_when: false
+
+    - name: Read WINDOWS_ADMIN_PASSWORD from .env.demo
+      ansible.builtin.shell:
+        cmd: "source {{ playbook_dir }}/../.env.demo && echo $WINDOWS_ADMIN_PASSWORD"
+      register: windows_pw_result
+      changed_when: false
+
+    - name: Set Windows credential facts
+      ansible.builtin.set_fact:
+        windows_private_ip: "{{ windows_ip_result.stdout | trim }}"
+        windows_admin_password: "{{ windows_pw_result.stdout | trim }}"
+
+    - name: Get GitHub repo URL
+      ansible.builtin.command: gh repo view windows-cert-rotation-demo --json url -q .url
+      register: git_repo_url_result
+      changed_when: false
+
+    - name: Set git repo URL fact
+      ansible.builtin.set_fact:
+        git_repo_url: "{{ git_repo_url_result.stdout | trim }}"
+
+  vars_files:
+    - vars/controller_config.yml
+
+  roles:
+    - role: infra.aap_configuration.dispatch
+
+  post_tasks:
+    # --- EDA Configuration via direct API ---
+
+    - name: Get AAP auth token
+      ansible.builtin.uri:
+        url: "{{ controller_hostname }}/api/v2/tokens/"
+        method: POST
+        user: "{{ controller_username }}"
+        password: "{{ controller_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ controller_validate_certs }}"
+        status_code: [200, 201]
+      register: aap_token_result
+
+    - name: Set auth token fact
+      ansible.builtin.set_fact:
+        aap_token: "{{ aap_token_result.json.token }}"
+
+    - name: Create EDA project
+      ansible.builtin.uri:
+        url: "{{ controller_hostname }}/api/eda/v1/projects/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ aap_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "Windows Cert Rotation EDA"
+          url: "{{ git_repo_url }}"
+          description: "EDA rulebooks for Windows cert rotation demo"
+        validate_certs: "{{ controller_validate_certs }}"
+        status_code: [200, 201]
+      register: eda_project_result
+
+    - name: Set EDA project ID fact
+      ansible.builtin.set_fact:
+        eda_project_id: "{{ eda_project_result.json.id }}"
+
+    - name: Wait for EDA project sync to complete
+      ansible.builtin.uri:
+        url: "{{ controller_hostname }}/api/eda/v1/projects/{{ eda_project_id }}/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ aap_token }}"
+        validate_certs: "{{ controller_validate_certs }}"
+      register: eda_project_status
+      until: eda_project_status.json.import_state in ['completed', 'failed']
+      retries: 20
+      delay: 15
+
+    - name: Assert EDA project sync succeeded
+      ansible.builtin.assert:
+        that: eda_project_status.json.import_state == 'completed'
+        fail_msg: "EDA project sync failed. Check the EDA UI for details."
+
+    - name: Create EDA event stream
+      ansible.builtin.uri:
+        url: "{{ controller_hostname }}/api/eda/v1/external-event-streams/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ aap_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "Windows Cert Expiry Stream"
+          organization_id: 1
+        validate_certs: "{{ controller_validate_certs }}"
+        status_code: [200, 201]
+      register: eda_stream_result
+
+    - name: Set EDA event stream facts
+      ansible.builtin.set_fact:
+        eda_stream_id: "{{ eda_stream_result.json.id }}"
+        eda_event_stream_url: "{{ eda_stream_result.json.url | default(controller_hostname + '/api/eda/v1/external-event-streams/' + eda_stream_result.json.id | string + '/post/') }}"
+
+    - name: Append EDA event stream URL to .env.demo
+      ansible.builtin.lineinfile:
+        path: "{{ playbook_dir }}/../.env.demo"
+        line: 'export EDA_EVENT_STREAM_URL="{{ eda_event_stream_url }}"'
+        create: no
+
+    - name: Get available decision environments
+      ansible.builtin.uri:
+        url: "{{ controller_hostname }}/api/eda/v1/decision-environments/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ aap_token }}"
+        validate_certs: "{{ controller_validate_certs }}"
+      register: eda_de_result
+
+    - name: Create decision environment if none exist
+      ansible.builtin.uri:
+        url: "{{ controller_hostname }}/api/eda/v1/decision-environments/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ aap_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "Default Decision Environment"
+          image_url: "registry.redhat.io/ansible-automation-platform-25/de-supported-rhel9:latest"
+          organization_id: 1
+        validate_certs: "{{ controller_validate_certs }}"
+        status_code: [200, 201]
+      register: eda_de_create_result
+      when: eda_de_result.json.count == 0
+
+    - name: Set decision environment ID fact
+      ansible.builtin.set_fact:
+        eda_de_id: >-
+          {{
+            eda_de_result.json.results[0].id
+            if eda_de_result.json.count > 0
+            else eda_de_create_result.json.id
+          }}
+
+    - name: Create EDA rulebook activation
+      ansible.builtin.uri:
+        url: "{{ controller_hostname }}/api/eda/v1/activations/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ aap_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "Windows Cert Expiry Watcher"
+          description: "Watches for cert expiry events and triggers rotation"
+          project_id: "{{ eda_project_id }}"
+          rulebook_name: "cert_expiry_watcher.yml"
+          decision_environment_id: "{{ eda_de_id }}"
+          is_enabled: true
+        validate_certs: "{{ controller_validate_certs }}"
+        status_code: [200, 201]
+      register: eda_activation_result
+
+    - name: Display AAP configuration summary
+      ansible.builtin.debug:
+        msg: |
+          =============================================
+          AAP Configuration Complete!
+          =============================================
+          Controller UI: {{ controller_hostname }}
+          Job Template: Rotate Windows Certificate
+          EDA Rulebook Activation: Windows Cert Expiry Watcher
+          Event Stream URL: {{ eda_event_stream_url }}
+
+          To fire a test event:
+            source .env.demo
+            bash scripts/send_test_event.sh
+          =============================================

@@ -1,0 +1,7 @@
+*.pem
+.env.demo
+vars/cert_thumbprints.yml
+*.retry
+__pycache__/
+*.pyc
+.DS_Store

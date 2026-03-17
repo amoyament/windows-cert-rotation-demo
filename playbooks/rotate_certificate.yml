@@ -1,0 +1,93 @@
+---
+- name: Rotate expiring Windows IIS certificate
+  hosts: "{{ target_host | default('windows') }}"
+  gather_facts: no
+  vars_files:
+    - ../vars/demo_vars.yml
+
+  tasks:
+    - name: Start certificate rotation
+      ansible.builtin.debug:
+        msg: "Starting certificate rotation on {{ inventory_hostname }}"
+
+    - name: Rotate certificate
+      block:
+        - name: Verify expiring certificate exists in store
+          ansible.windows.win_certificate_info:
+            thumbprint: "{{ cert_thumbprint }}"
+            store_location: "{{ cert_store_location }}"
+            store_name: "{{ cert_store_name }}"
+          register: expiring_cert_info
+
+        - name: Assert expiring certificate was found
+          ansible.builtin.assert:
+            that: expiring_cert_info.certificates | length > 0
+            fail_msg: "Expiring certificate {{ cert_thumbprint }} not found in store"
+
+        - name: Confirm expiring certificate found
+          ansible.builtin.debug:
+            msg: "Found expiring certificate: {{ cert_thumbprint }}"
+
+        - name: Find replacement certificate
+          ansible.windows.win_shell: |
+            $certs = Get-ChildItem Cert:\LocalMachine\My | Where-Object {
+                $_.Subject -like "*{{ cert_dns_name }}*" -and
+                $_.Thumbprint -ne "{{ cert_thumbprint }}" -and
+                $_.NotAfter -gt (Get-Date)
+            } | Sort-Object NotAfter -Descending
+            if ($certs) {
+                Write-Output $certs[0].Thumbprint
+            } else {
+                throw "No replacement certificate found for {{ cert_dns_name }}"
+            }
+          register: replacement_cert_result
+
+        - name: Set replacement certificate thumbprint fact
+          ansible.builtin.set_fact:
+            new_cert_thumbprint: "{{ replacement_cert_result.stdout_lines[0] | trim }}"
+
+        - name: Confirm replacement certificate found
+          ansible.builtin.debug:
+            msg: "Found replacement certificate: {{ new_cert_thumbprint }}"
+
+        - name: Rebind IIS HTTPS to replacement certificate
+          ansible.windows.win_shell: |
+            Import-Module WebAdministration
+            $binding = Get-WebBinding -Name "{{ iis_site_name }}" -Protocol https
+            $binding.AddSslCertificate("{{ new_cert_thumbprint }}", "My")
+
+        - name: Confirm IIS binding updated
+          ansible.builtin.debug:
+            msg: "IIS HTTPS binding updated to new certificate"
+
+        - name: Remove expired certificate from store
+          ansible.windows.win_certificate_store:
+            thumbprint: "{{ cert_thumbprint }}"
+            state: absent
+            store_location: "{{ cert_store_location }}"
+            store_name: "{{ cert_store_name }}"
+
+        - name: Confirm old certificate removed
+          ansible.builtin.debug:
+            msg: "Old certificate removed from store"
+
+        - name: Verify HTTPS is still working with new certificate
+          ansible.windows.win_uri:
+            url: "https://localhost"
+            validate_certs: no
+          register: verify_result
+
+        - name: Assert HTTPS is healthy
+          ansible.builtin.assert:
+            that: verify_result.status_code == 200
+            success_msg: "IIS is serving HTTPS with the new certificate!"
+            fail_msg: "IIS HTTPS check failed after certificate rotation"
+
+        - name: Certificate rotation complete
+          ansible.builtin.debug:
+            msg: "Certificate rotation complete! New cert: {{ new_cert_thumbprint }}"
+
+      rescue:
+        - name: Report rotation failure
+          ansible.builtin.debug:
+            msg: "Certificate rotation FAILED: {{ ansible_failed_result.msg | default('Unknown error') }}"

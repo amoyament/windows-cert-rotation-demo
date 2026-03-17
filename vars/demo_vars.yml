@@ -1,0 +1,10 @@
+---
+cert_dns_name: "demo.contoso.com"
+cert_store_location: LocalMachine
+cert_store_name: My
+cert_expiry_threshold_days: 7
+demo_cert_validity_minutes: 20
+replacement_cert_validity_years: 1
+iis_site_name: "Default Web Site"
+iis_https_port: 443
+cert_check_interval_minutes: 5

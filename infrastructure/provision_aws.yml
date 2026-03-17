@@ -1,0 +1,291 @@
+---
+- name: Provision Windows VM in same AWS VPC as AAP
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+
+  vars:
+    owner_tags:
+      Owner: atrotter
+      Environment: Demo
+      Purpose: cert-rotation-demo
+
+  pre_tasks:
+    - name: Validate required environment variables
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'AAP_HOSTNAME') | length > 0
+          - lookup('env', 'MY_PUBLIC_IP') | length > 0
+        fail_msg: |
+          Missing required environment variables. Please set:
+            export AAP_HOSTNAME="your-aap-url.example.com"
+            export MY_PUBLIC_IP="$(curl -s https://checkip.amazonaws.com)"
+
+    - name: Set AAP and user facts from environment
+      ansible.builtin.set_fact:
+        aap_hostname: "{{ lookup('env', 'AAP_HOSTNAME') }}"
+        my_public_ip: "{{ lookup('env', 'MY_PUBLIC_IP') }}"
+
+  tasks:
+    - name: Resolve AAP hostname to IP address
+      ansible.builtin.shell:
+        cmd: "getent hosts {{ aap_hostname }} | awk '{print $1}'"
+      register: aap_ip_result
+      changed_when: false
+
+    - name: Fail if AAP hostname cannot be resolved
+      ansible.builtin.assert:
+        that: aap_ip_result.stdout | length > 0
+        fail_msg: "Cannot resolve AAP hostname {{ aap_hostname }}. Check DNS."
+
+    - name: Set AAP IP fact
+      ansible.builtin.set_fact:
+        aap_ip: "{{ aap_ip_result.stdout | trim }}"
+
+    - name: Find AAP EC2 instance by private IP
+      amazon.aws.ec2_instance_info:
+        filters:
+          "private-ip-address": "{{ aap_ip }}"
+      register: ec2_by_private_ip
+
+    - name: Find AAP EC2 instance by public IP (if private lookup failed)
+      amazon.aws.ec2_instance_info:
+        filters:
+          "ip-address": "{{ aap_ip }}"
+      register: ec2_by_public_ip
+      when: ec2_by_private_ip.instances | length == 0
+
+    - name: Find AAP EC2 instance by network interface public IP (last attempt)
+      amazon.aws.ec2_instance_info:
+        filters:
+          "network-interface.addresses.association.public-ip": "{{ aap_ip }}"
+      register: ec2_by_eni_public_ip
+      when:
+        - ec2_by_private_ip.instances | length == 0
+        - ec2_by_public_ip.instances | default([]) | length == 0
+
+    - name: Consolidate AAP EC2 instance results
+      ansible.builtin.set_fact:
+        aap_instances: >-
+          {{
+            ec2_by_private_ip.instances
+            if ec2_by_private_ip.instances | length > 0
+            else (ec2_by_public_ip.instances | default([]))
+            if (ec2_by_public_ip.instances | default([])) | length > 0
+            else (ec2_by_eni_public_ip.instances | default([]))
+          }}
+
+    - name: Assert AAP EC2 instance was found
+      ansible.builtin.assert:
+        that: aap_instances | length > 0
+        fail_msg: >
+          Could not find EC2 instance for AAP hostname {{ aap_hostname }}.
+          Ensure AAP runs in this AWS account/region.
+
+    - name: Extract AAP network details
+      ansible.builtin.set_fact:
+        aap_vpc_id: "{{ aap_instances[0].vpc_id }}"
+        aap_subnet_id: "{{ aap_instances[0].subnet_id }}"
+        aap_az: "{{ aap_instances[0].placement.availability_zone }}"
+        aap_region: "{{ aap_instances[0].placement.availability_zone[:-1] }}"
+        aap_private_ip: "{{ aap_instances[0].private_ip_address }}"
+
+    - name: Display discovered AAP network info
+      ansible.builtin.debug:
+        msg: |
+          AAP Instance Network Discovery:
+            VPC:          {{ aap_vpc_id }}
+            Subnet:       {{ aap_subnet_id }}
+            AZ:           {{ aap_az }}
+            Region:       {{ aap_region }}
+            AAP Private IP: {{ aap_private_ip }}
+
+    - name: Get VPC CIDR block
+      amazon.aws.ec2_vpc_net_info:
+        vpc_ids:
+          - "{{ aap_vpc_id }}"
+        region: "{{ aap_region }}"
+      register: vpc_info
+
+    - name: Set VPC CIDR fact
+      ansible.builtin.set_fact:
+        vpc_cidr: "{{ vpc_info.vpcs[0].cidr_block }}"
+
+    - name: Find latest Windows Server 2022 AMI
+      amazon.aws.ec2_ami_info:
+        region: "{{ aap_region }}"
+        owners:
+          - amazon
+        filters:
+          name: "Windows_Server-2022-English-Full-Base-*"
+          state: available
+      register: win_amis
+
+    - name: Set Windows AMI fact (newest)
+      ansible.builtin.set_fact:
+        windows_ami_id: "{{ (win_amis.images | sort(attribute='creation_date') | last).image_id }}"
+
+    - name: Display selected AMI
+      ansible.builtin.debug:
+        msg: "Using Windows Server 2022 AMI: {{ windows_ami_id }}"
+
+    - name: Create EC2 key pair
+      amazon.aws.ec2_key:
+        name: cert-rotation-demo-key
+        region: "{{ aap_region }}"
+        tags: "{{ owner_tags }}"
+      register: ec2_key
+
+    - name: Save private key to disk
+      ansible.builtin.copy:
+        content: "{{ ec2_key.key.private_key }}"
+        dest: "{{ playbook_dir }}/../cert-rotation-demo-key.pem"
+        mode: '0600'
+      when: ec2_key.changed
+
+    - name: Create security group
+      amazon.aws.ec2_security_group:
+        name: cert-rotation-demo-sg
+        description: "Windows cert rotation demo - managed by Ansible"
+        vpc_id: "{{ aap_vpc_id }}"
+        region: "{{ aap_region }}"
+        tags: "{{ owner_tags }}"
+        rules:
+          - proto: tcp
+            ports: [3389]
+            cidr_ip: "{{ my_public_ip }}/32"
+            rule_desc: "RDP from user IP"
+          - proto: tcp
+            ports: [5986]
+            cidr_ip: "{{ vpc_cidr }}"
+            rule_desc: "WinRM HTTPS from VPC"
+          - proto: tcp
+            ports: [443]
+            cidr_ip: "0.0.0.0/0"
+            rule_desc: "HTTPS for IIS demo"
+          - proto: tcp
+            ports: [80]
+            cidr_ip: "0.0.0.0/0"
+            rule_desc: "HTTP for IIS test"
+      register: sg_result
+
+    - name: Launch Windows EC2 instance
+      amazon.aws.ec2_instance:
+        name: cert-rotation-demo-windows
+        image_id: "{{ windows_ami_id }}"
+        instance_type: t3.medium
+        key_name: cert-rotation-demo-key
+        vpc_subnet_id: "{{ aap_subnet_id }}"
+        security_groups:
+          - cert-rotation-demo-sg
+        network:
+          assign_public_ip: true
+        user_data: "{{ lookup('file', playbook_dir + '/../scripts/winrm_userdata.ps1') }}"
+        volumes:
+          - device_name: /dev/sda1
+            ebs:
+              volume_size: 30
+              volume_type: gp3
+              delete_on_termination: true
+        tags: "{{ owner_tags }}"
+        state: running
+        wait: true
+        region: "{{ aap_region }}"
+      register: ec2_result
+
+    - name: Set instance facts
+      ansible.builtin.set_fact:
+        windows_instance_id: "{{ ec2_result.instances[0].instance_id }}"
+        windows_public_ip: "{{ ec2_result.instances[0].public_ip_address }}"
+        windows_private_ip: "{{ ec2_result.instances[0].private_ip_address }}"
+
+    - name: Wait for WinRM to become available
+      ansible.builtin.wait_for:
+        host: "{{ windows_public_ip }}"
+        port: 5986
+        timeout: 600
+        delay: 120
+
+    - name: Decrypt Windows administrator password
+      community.aws.ec2_win_password:
+        instance_id: "{{ windows_instance_id }}"
+        key_file: "{{ playbook_dir }}/../cert-rotation-demo-key.pem"
+        region: "{{ aap_region }}"
+        wait: true
+        wait_timeout: 300
+      register: win_password_result
+
+    - name: Set Windows password fact
+      ansible.builtin.set_fact:
+        windows_admin_password: "{{ win_password_result.win_password }}"
+
+    - name: Write inventory/hosts.yml
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/../inventory/hosts.yml"
+        content: |
+          ---
+          # Auto-generated by infrastructure/provision_aws.yml
+          all:
+            children:
+              windows:
+                hosts:
+                  {{ windows_private_ip }}:
+                    ansible_user: Administrator
+                    ansible_password: "{{ windows_admin_password }}"
+        mode: '0600'
+
+    - name: Write .env.demo
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/../.env.demo"
+        content: |
+          export WINDOWS_PUBLIC_IP="{{ windows_public_ip }}"
+          export WINDOWS_PRIVATE_IP="{{ windows_private_ip }}"
+          export WINDOWS_ADMIN_PASSWORD="{{ windows_admin_password }}"
+          export WINDOWS_INSTANCE_ID="{{ windows_instance_id }}"
+          export AAP_VPC_ID="{{ aap_vpc_id }}"
+          export AAP_SUBNET_ID="{{ aap_subnet_id }}"
+          export AAP_REGION="{{ aap_region }}"
+          export AAP_PRIVATE_IP="{{ aap_private_ip }}"
+        mode: '0600'
+
+    - name: Add Windows host to in-memory inventory
+      ansible.builtin.add_host:
+        name: "{{ windows_public_ip }}"
+        groups: windows
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_connection: winrm
+        ansible_winrm_transport: ntlm
+        ansible_winrm_server_cert_validation: ignore
+        ansible_port: 5986
+        ansible_winrm_scheme: https
+
+    - name: Display provisioning summary
+      ansible.builtin.debug:
+        msg: |
+          =============================================
+          Windows VM Provisioned Successfully!
+          =============================================
+          Public IP (RDP/browser): {{ windows_public_ip }}
+          Private IP (AAP inventory): {{ windows_private_ip }}
+          Admin Password: {{ windows_admin_password }}
+          Instance ID: {{ windows_instance_id }}
+
+          RDP: mstsc /v:{{ windows_public_ip }}
+          IIS: https://{{ windows_public_ip }}
+
+          All details saved to .env.demo
+          All resources tagged: Owner=atrotter
+          =============================================
+
+- name: Verify WinRM connectivity
+  hosts: windows
+  gather_facts: no
+
+  tasks:
+    - name: Test WinRM connection with win_ping
+      ansible.windows.win_ping:
+      retries: 5
+      delay: 60
+      register: ping_result
+      until: ping_result is succeeded

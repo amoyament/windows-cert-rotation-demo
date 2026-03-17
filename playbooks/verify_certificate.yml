@@ -1,0 +1,46 @@
+---
+- name: Verify certificate status on Windows IIS
+  hosts: windows
+  gather_facts: no
+
+  vars_files:
+    - ../vars/demo_vars.yml
+
+  tasks:
+    - name: Query all certificates in LocalMachine\My store
+      ansible.windows.win_certificate_info:
+        store_location: "{{ cert_store_location }}"
+        store_name: "{{ cert_store_name }}"
+      register: cert_store_info
+
+    - name: Display all certificates in store
+      ansible.builtin.debug:
+        msg:
+          - "Subject:       {{ item.subject }}"
+          - "Thumbprint:    {{ item.thumbprint }}"
+          - "Expires:       {{ item.valid_to }}"
+          - "Friendly Name: {{ item.friendly_name | default('N/A') }}"
+      loop: "{{ cert_store_info.certificates }}"
+      loop_control:
+        label: "{{ item.thumbprint }}"
+
+    - name: Get current IIS HTTPS binding certificate hash
+      ansible.windows.win_shell: |
+        Import-Module WebAdministration
+        Get-WebBinding -Protocol https | ForEach-Object { $_.certificateHash }
+      register: iis_binding_result
+
+    - name: Display current IIS HTTPS certificate
+      ansible.builtin.debug:
+        msg: "Current IIS HTTPS cert: {{ iis_binding_result.stdout | trim }}"
+
+    - name: Flag certificates expiring within threshold
+      ansible.builtin.debug:
+        msg: >-
+          WARNING - Certificate {{ item.thumbprint }} ({{ item.subject }})
+          expires {{ item.valid_to }} — within {{ cert_expiry_threshold_days }}-day threshold!
+      loop: "{{ cert_store_info.certificates }}"
+      loop_control:
+        label: "{{ item.thumbprint }}"
+      when: >
+        (item.valid_to | to_datetime('%Y%m%d%H%M%S.%f%z') - now(utc=true, fmt='%Y%m%d%H%M%S.%f%z') | to_datetime('%Y%m%d%H%M%S.%f%z')).days <= cert_expiry_threshold_days

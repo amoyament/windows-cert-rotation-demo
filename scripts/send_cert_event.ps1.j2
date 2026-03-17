@@ -1,0 +1,58 @@
+# Certificate Expiry Check and Event Sender
+# Templated by Ansible — do not edit directly
+# Runs on a scheduled task every {{ cert_check_interval_minutes }} minutes
+
+$EventStreamUrl = "{{ eda_event_stream_url }}"
+$ThresholdDays = {{ cert_expiry_threshold_days }}
+$StoreName = "{{ cert_store_name }}"
+$StoreLocation = "{{ cert_store_location }}"
+$DnsName = "{{ cert_dns_name }}"
+$Hostname = $env:COMPUTERNAME
+
+# Log function
+function Write-CertLog {
+    param([string]$Message, [string]$Level = "INFO")
+    $timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ"
+    Write-EventLog -LogName Application -Source "CertExpiryCheck" -EventId 1000 -EntryType Information -Message "[$Level] $Message"
+    Write-Output "[$timestamp][$Level] $Message"
+}
+
+Write-CertLog "Starting certificate expiry check (threshold: $ThresholdDays days)"
+
+try {
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($StoreName, $StoreLocation)
+    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+
+    $certs = $store.Certificates | Where-Object {
+        $_.Subject -like "*$DnsName*" -and $_.NotAfter -gt (Get-Date)
+    }
+
+    foreach ($cert in $certs) {
+        $daysLeft = [math]::Round(($cert.NotAfter - (Get-Date)).TotalDays)
+        Write-CertLog "Found cert: $($cert.Thumbprint) | Subject: $($cert.Subject) | Expires: $($cert.NotAfter) | Days left: $daysLeft"
+
+        if ($daysLeft -le $ThresholdDays) {
+            Write-CertLog "Certificate expiring in $daysLeft days — sending event to EDA" "WARN"
+
+            $payload = @{
+                event_type  = "cert_expiring"
+                host        = $Hostname
+                thumbprint  = $cert.Thumbprint
+                days_left   = $daysLeft
+                cert_subject = $cert.Subject
+                timestamp   = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+            } | ConvertTo-Json
+
+            try {
+                $response = Invoke-RestMethod -Uri $EventStreamUrl -Method POST -Body $payload -ContentType "application/json"
+                Write-CertLog "Event sent successfully. Response: $response"
+            } catch {
+                Write-CertLog "Failed to send event: $_" "ERROR"
+            }
+        }
+    }
+
+    $store.Close()
+} catch {
+    Write-CertLog "Error during cert check: $_" "ERROR"
+}

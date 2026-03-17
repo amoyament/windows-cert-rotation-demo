@@ -1,0 +1,19 @@
+---
+- name: Windows Certificate Expiry Watcher
+  hosts: all
+  sources:
+    - ansible.eda.webhook:
+        host: 0.0.0.0
+        port: 5000
+
+  rules:
+    - name: Certificate expiring within 7 days - trigger rotation
+      condition: event.payload.days_left <= 7 and event.payload.event_type == "cert_expiring"
+      action:
+        run_job_template:
+          name: "Rotate Windows Certificate"
+          organization: "Default"
+          job_args:
+            extra_vars:
+              target_host: "{{ event.payload.host }}"
+              cert_thumbprint: "{{ event.payload.thumbprint }}"
