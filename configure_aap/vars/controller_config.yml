@@ -1,0 +1,53 @@
+---
+controller_credentials:
+  - name: "Windows Demo Credential"
+    description: "Machine credential for Windows cert rotation demo"
+    organization: "Default"
+    credential_type: "Machine"
+    inputs:
+      username: "Administrator"
+      password: "{{ windows_admin_password }}"
+
+controller_inventories:
+  - name: "Windows Demo Inventory"
+    description: "Inventory for Windows cert rotation demo"
+    organization: "Default"
+
+controller_hosts:
+  - name: "{{ windows_private_ip }}"
+    inventory: "Windows Demo Inventory"
+    variables:
+      ansible_connection: winrm
+      ansible_winrm_transport: ntlm
+      ansible_winrm_server_cert_validation: ignore
+      ansible_port: 5986
+      ansible_winrm_scheme: https
+
+controller_groups:
+  - name: windows
+    inventory: "Windows Demo Inventory"
+    hosts:
+      - "{{ windows_private_ip }}"
+
+controller_projects:
+  - name: "Windows Cert Rotation"
+    description: "Playbooks for Windows certificate rotation demo"
+    organization: "Default"
+    scm_type: git
+    scm_url: "{{ git_repo_url }}"
+    scm_branch: main
+    scm_update_on_launch: true
+    scm_clean: true
+
+controller_templates:
+  - name: "Rotate Windows Certificate"
+    description: "Rotates an expiring IIS certificate when triggered by EDA"
+    organization: "Default"
+    project: "Windows Cert Rotation"
+    playbook: "playbooks/rotate_certificate.yml"
+    inventory: "Windows Demo Inventory"
+    credentials:
+      - "Windows Demo Credential"
+    ask_variables_on_launch: true
+    extra_vars:
+      cert_dns_name: "demo.contoso.com"

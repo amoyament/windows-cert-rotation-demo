@@ -1,0 +1,13 @@
+---
+collections:
+  - name: amazon.aws
+  - name: community.aws
+  - name: ansible.windows
+  - name: community.windows
+  - name: infra.windows_ops
+  - name: infra.aap_configuration
+  - name: ansible.controller
+    version: ">=4.6.0"
+  - name: ansible.eda
+  - name: ansible.platform
+  - name: community.crypto

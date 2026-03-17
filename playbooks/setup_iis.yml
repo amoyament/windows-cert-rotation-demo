@@ -1,0 +1,97 @@
+---
+- name: Setup IIS and demo TLS certificates on Windows
+  hosts: windows
+  gather_facts: no
+  vars_files:
+    - ../vars/demo_vars.yml
+
+  tasks:
+    - name: Install IIS web server role
+      ansible.windows.win_feature:
+        name: Web-Server
+        include_management_tools: yes
+      register: iis_install
+
+    - name: Start and enable IIS service
+      ansible.windows.win_service:
+        name: W3SVC
+        state: started
+        start_mode: auto
+
+    - name: Create demo HTML page
+      ansible.windows.win_copy:
+        content: |
+          <!DOCTYPE html>
+          <html>
+          <head><title>Certificate Rotation Demo</title></head>
+          <body>
+            <h1>Certificate Rotation Demo</h1>
+            <p>Protected by auto-rotating TLS via Red Hat AAP and EDA</p>
+          </body>
+          </html>
+        dest: C:\inetpub\wwwroot\index.html
+
+    - name: Create short-lived demo certificate (expires in {{ demo_cert_validity_minutes }} minutes)
+      ansible.windows.win_shell: |
+        $cert = New-SelfSignedCertificate `
+          -DnsName "{{ cert_dns_name }}" `
+          -CertStoreLocation "Cert:\LocalMachine\My" `
+          -NotAfter (Get-Date).AddMinutes({{ demo_cert_validity_minutes }}) `
+          -KeyExportPolicy Exportable `
+          -KeySpec KeyExchange `
+          -KeyLength 2048 `
+          -FriendlyName "Demo Cert - Expiring Soon"
+        Write-Output $cert.Thumbprint
+      register: old_cert_result
+
+    - name: Set old certificate thumbprint fact
+      ansible.builtin.set_fact:
+        old_cert_thumbprint: "{{ old_cert_result.stdout_lines[0] | trim }}"
+
+    - name: Create replacement certificate (valid {{ replacement_cert_validity_years }} year)
+      ansible.windows.win_shell: |
+        $cert = New-SelfSignedCertificate `
+          -DnsName "{{ cert_dns_name }}" `
+          -CertStoreLocation "Cert:\LocalMachine\My" `
+          -NotAfter (Get-Date).AddYears({{ replacement_cert_validity_years }}) `
+          -KeyExportPolicy Exportable `
+          -KeySpec KeyExchange `
+          -KeyLength 2048 `
+          -FriendlyName "Demo Cert - Renewed"
+        Write-Output $cert.Thumbprint
+      register: new_cert_result
+
+    - name: Set new certificate thumbprint fact
+      ansible.builtin.set_fact:
+        new_cert_thumbprint: "{{ new_cert_result.stdout_lines[0] | trim }}"
+
+    - name: Bind short-lived certificate to IIS HTTPS
+      ansible.windows.win_shell: |
+        Import-Module WebAdministration
+        Get-WebBinding -Name "{{ iis_site_name }}" -Protocol https -ErrorAction SilentlyContinue |
+          Remove-WebBinding -ErrorAction SilentlyContinue
+        New-WebBinding -Name "{{ iis_site_name }}" -Protocol https -Port {{ iis_https_port }} -IPAddress "*"
+        $binding = Get-WebBinding -Name "{{ iis_site_name }}" -Protocol https
+        $binding.AddSslCertificate("{{ old_cert_thumbprint }}", "My")
+
+    - name: Verify HTTPS is working
+      ansible.windows.win_uri:
+        url: "https://localhost"
+        validate_certs: no
+        return_content: yes
+      register: https_check
+
+    - name: Save cert thumbprints to vars/cert_thumbprints.yml
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/../vars/cert_thumbprints.yml"
+        content: |
+          old_cert_thumbprint: "{{ old_cert_thumbprint }}"
+          new_cert_thumbprint: "{{ new_cert_thumbprint }}"
+      delegate_to: localhost
+
+    - name: Display certificate thumbprints
+      ansible.builtin.debug:
+        msg:
+          - "Short-lived cert (expiring in {{ demo_cert_validity_minutes }}m): {{ old_cert_thumbprint }}"
+          - "Replacement cert (valid {{ replacement_cert_validity_years }}yr):  {{ new_cert_thumbprint }}"
+          - "IIS HTTPS verified — status: {{ https_check.status_code }}"
