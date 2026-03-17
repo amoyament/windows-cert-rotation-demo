@@ -29,7 +29,7 @@
   tasks:
     - name: Resolve AAP hostname to IP address
       ansible.builtin.shell:
-        cmd: "getent hosts {{ aap_hostname }} | awk '{print $1}'"
+        cmd: "python3 -c \"import socket; print(socket.gethostbyname('{{ aap_hostname }}'))\""
       register: aap_ip_result
       changed_when: false
 
@@ -156,9 +156,13 @@
             cidr_ip: "{{ my_public_ip }}/32"
             rule_desc: "RDP from user IP"
           - proto: tcp
-            ports: [5986]
+            ports: [5985]
             cidr_ip: "{{ vpc_cidr }}"
-            rule_desc: "WinRM HTTPS from VPC"
+            rule_desc: "WinRM HTTP from VPC"
+          - proto: tcp
+            ports: [5985]
+            cidr_ip: "{{ my_public_ip }}/32"
+            rule_desc: "WinRM HTTP from operator IP"
           - proto: tcp
             ports: [443]
             cidr_ip: "0.0.0.0/0"
@@ -202,7 +206,7 @@
     - name: Wait for WinRM to become available
       ansible.builtin.wait_for:
         host: "{{ windows_public_ip }}"
-        port: 5986
+        port: 5985
         timeout: 600
         delay: 120
 

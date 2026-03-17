@@ -6,6 +6,12 @@
     - ../vars/demo_vars.yml
 
   tasks:
+    - name: Wait for WinRM to become fully stable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+        delay: 10
+        sleep: 15
+
     - name: Install IIS web server role
       ansible.windows.win_feature:
         name: Web-Server
