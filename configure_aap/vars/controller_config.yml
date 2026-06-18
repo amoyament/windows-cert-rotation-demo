@@ -20,8 +20,8 @@ controller_hosts:
       ansible_connection: winrm
       ansible_winrm_transport: ntlm
       ansible_winrm_server_cert_validation: ignore
-      ansible_port: 5986
-      ansible_winrm_scheme: https
+      ansible_port: 5985
+      ansible_winrm_scheme: http
 
 controller_groups:
   - name: windows
@@ -40,8 +40,20 @@ controller_projects:
     scm_clean: true
 
 controller_templates:
+  - name: "AI Certificate Risk Analysis"
+    description: "AI-powered risk analysis that decides whether to proceed, delay, or escalate certificate rotation"
+    organization: "Default"
+    project: "Windows Cert Rotation"
+    playbook: "playbooks/ai_risk_analysis.yml"
+    inventory: "Windows Demo Inventory"
+    credentials:
+      - "Windows Demo Credential"
+    ask_variables_on_launch: true
+    extra_vars:
+      cert_dns_name: "demo.contoso.com"
+
   - name: "Rotate Windows Certificate"
-    description: "Rotates an expiring IIS certificate when triggered by EDA"
+    description: "Rotates an expiring IIS certificate and updates ServiceNow with AI change summary"
     organization: "Default"
     project: "Windows Cert Rotation"
     playbook: "playbooks/rotate_certificate.yml"
