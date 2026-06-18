@@ -108,6 +108,9 @@
               - The current time is OUTSIDE peak business hours AND the dependency risk is manageable
               - A previous DELAY decision was made but the certificate is now critically close to expiry
 
+              ADDITIONAL CONTEXT:
+              {{ additional_context | default('None provided.') }}
+
               DELAY when:
               - The current time is DURING peak business hours (07:00-19:00 US-Eastern) AND a maintenance window is available before the certificate expires
               - High-risk upstream dependencies (F5 health monitors, ARR) would be impacted AND a safer window exists within the expiry timeline
@@ -313,7 +316,7 @@
                       days_until = 7
                   target = now + timedelta(days=days_until)
                   scheduled = target.replace(hour={{ maintenance_window_hour_utc }}, minute=0, second=0, microsecond=0)
-                  print(scheduled.strftime('%Y-%m-%dT%H:%M:%SZ'))
+                  print(scheduled.strftime('%Y%m%dT%H%M%SZ'))
                   "
               register: scheduled_time_result
               changed_when: false
