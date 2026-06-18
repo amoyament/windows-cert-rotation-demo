@@ -17,3 +17,52 @@ llm_max_tokens: 1024
 
 # ServiceNow
 snow_instance: "your-instance.service-now.com"
+
+# Simulated CMDB / environment context for AI enrichment
+# In production this would come from a CMDB query or service catalog lookup
+service_context:
+  application: "Contoso Intranet Portal"
+  business_unit: "Corporate IT"
+  service_tier: "Tier 1 - Business Critical"
+  sla: "99.95% uptime (< 4.38 hrs downtime/year)"
+  compliance:
+    - "HIPAA (Section 164.312(e)(1): encryption of ePHI in transit)"
+    - "SOX Section 404 (IT general controls over financial reporting systems)"
+    - "NIST 800-53 SC-8 (Transmission Confidentiality and Integrity)"
+  active_users: 8600
+  peak_hours: "07:00-19:00 US-Eastern"
+  revenue_impact: "Portal supports $2.1M/day in purchase order processing"
+  dependencies:
+    upstream:
+      - name: "F5 BIG-IP load balancer (prod-iis-vip-01)"
+        note: "HTTPS health monitor validates TLS handshake every 10s. Will mark IIS node down on cert failure."
+      - name: "IIS Application Request Routing (ARR) reverse proxy"
+        note: "ARR on frontend IIS farm forwards to backend app servers. Frontend cert only, backend uses separate internal cert."
+    downstream:
+      - name: "SQL Server Reporting Services (SSRS)"
+        note: "Embedded report viewer iframes load over HTTPS from same IIS binding. Cert mismatch will break embedded reports."
+      - name: "SharePoint Online via Azure AD App Proxy"
+        note: "Azure AD App Proxy connector validates backend IIS cert. Cert rotation triggers connector re-validation (< 30s)."
+      - name: "Power BI Embedded dashboards"
+        note: "Dashboards call IIS REST API over HTTPS. Uses Azure AD token auth, server cert must be valid for token exchange."
+      - name: "SAP GUI for Windows (via Web Dispatcher)"
+        note: "SAP Web Dispatcher proxies to IIS for employee self-service. Uses separate TLS termination, not affected."
+    monitoring:
+      - "SCOM 2022 (System Center Operations Manager): IIS certificate monitor, 5-minute check interval, alerts Windows Admin team"
+      - "Azure Monitor Application Insights: synthetic availability test every 60s, alerts via Action Group to Microsoft Teams #ops-alerts channel"
+      - "Windows Event Log forwarding: CertificateServicesClient events forwarded to central SIEM via WEF (Windows Event Forwarding)"
+  change_history:
+    - date: "2026-03-14"
+      event: "Scheduled cert rotation via ADCS auto-enrollment"
+      outcome: "Success. 0s downtime. ADCS issued new cert and IIS picked it up via auto-rebind GPO."
+    - date: "2025-11-02"
+      event: "Emergency cert rotation (internal CA key compromise)"
+      outcome: "Success, but F5 health monitor flapped for 45s during manual rebind. 12 failed requests. SCOM alert fired, resolved within 3 minutes. Post-incident: added pre-rotation F5 node drain to runbook."
+    - date: "2025-08-19"
+      event: "Cert expired unnoticed on secondary IIS node"
+      outcome: "4.5 hour partial outage. F5 routed all traffic to primary node (degraded performance). 312 helpdesk tickets. SSRS reports broken for all users hitting secondary node. Led to adoption of EDA certificate monitoring."
+  ca_infrastructure: "Active Directory Certificate Services (ADCS), Enterprise Root CA: Contoso-Root-CA, Issuing CA: Contoso-Issuing-CA-01"
+  cert_enrollment: "Auto-enrollment via GPO disabled for IIS certs (manual template). EDA monitors expiry and triggers rotation playbook."
+  current_time_context: "Automated rotation triggered outside maintenance window"
+  maintenance_window: "Saturday 02:00-06:00 US-Eastern"
+  on_call_team: "Windows Platform Admin (primary: R. Patel, backup: K. Nowak)"
