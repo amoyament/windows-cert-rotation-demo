@@ -5,3 +5,4 @@ collections:
   - name: ansible.windows
   - name: community.windows
   - name: community.crypto
+  - name: servicenow.itsm
