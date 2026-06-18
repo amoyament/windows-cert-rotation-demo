@@ -5,7 +5,7 @@
   vars_files:
     - ../vars/demo_vars.yml
   vars:
-    anthropic_api_key: "{{ lookup('env', 'ANTHROPIC_API_KEY') }}"
+    vertex_api_url: "https://{{ vertex_region }}-aiplatform.googleapis.com/v1/projects/{{ vertex_project }}/locations/{{ vertex_region }}/publishers/anthropic/models/{{ vertex_model }}:rawPredict"
     snow_username: "{{ lookup('env', 'SN_USERNAME') | default('aap-roadshow', true) }}"
     snow_password: "{{ lookup('env', 'SN_PASSWORD') | default('Ans1ble123!', true) }}"
 
@@ -37,6 +37,18 @@
         # ---------------------------------------------------------------
         - name: AI impact analysis
           block:
+            - name: Get Google Cloud access token
+              ansible.builtin.command:
+                cmd: gcloud auth print-access-token
+              delegate_to: localhost
+              register: gcloud_token_result
+              changed_when: false
+
+            - name: Set access token fact
+              ansible.builtin.set_fact:
+                gcp_access_token: "{{ gcloud_token_result.stdout | trim }}"
+              delegate_to: localhost
+
             - name: Build impact analysis prompt
               ansible.builtin.set_fact:
                 impact_prompt: |
@@ -59,15 +71,14 @@
 
             - name: Call AI for impact analysis
               ansible.builtin.uri:
-                url: "{{ llm_api_url }}"
+                url: "{{ vertex_api_url }}"
                 method: POST
                 headers:
-                  x-api-key: "{{ anthropic_api_key }}"
-                  anthropic-version: "2023-06-01"
+                  Authorization: "Bearer {{ gcp_access_token }}"
                   Content-Type: "application/json"
                 body_format: json
                 body:
-                  model: "{{ llm_model }}"
+                  anthropic_version: "vertex-2023-10-16"
                   max_tokens: "{{ llm_max_tokens }}"
                   messages:
                     - role: user
@@ -107,7 +118,7 @@
                   {{ ai_impact_analysis }}
                 impact: medium
                 urgency: medium
-                caller: "Event-Driven Ansible"
+                caller: "{{ snow_username }}"
                 other:
                   category: "Software"
                   subcategory: "Certificate Management"
@@ -224,15 +235,14 @@
 
             - name: Call AI for change summary
               ansible.builtin.uri:
-                url: "{{ llm_api_url }}"
+                url: "{{ vertex_api_url }}"
                 method: POST
                 headers:
-                  x-api-key: "{{ anthropic_api_key }}"
-                  anthropic-version: "2023-06-01"
+                  Authorization: "Bearer {{ gcp_access_token }}"
                   Content-Type: "application/json"
                 body_format: json
                 body:
-                  model: "{{ llm_model }}"
+                  anthropic_version: "vertex-2023-10-16"
                   max_tokens: "{{ llm_max_tokens }}"
                   messages:
                     - role: user
