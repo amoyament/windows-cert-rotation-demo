@@ -4,6 +4,10 @@
   gather_facts: no
   vars_files:
     - ../vars/demo_vars.yml
+  vars:
+    anthropic_api_key: "{{ lookup('env', 'ANTHROPIC_API_KEY') }}"
+    snow_username: "{{ lookup('env', 'SN_USERNAME') | default('aap-roadshow', true) }}"
+    snow_password: "{{ lookup('env', 'SN_PASSWORD') | default('Ans1ble123!', true) }}"
 
   tasks:
     - name: Start certificate rotation
@@ -28,6 +32,113 @@
           ansible.builtin.debug:
             msg: "Found expiring certificate: {{ cert_thumbprint }}"
 
+        # ---------------------------------------------------------------
+        # Act 1: AI Impact Analysis (pre-rotation)
+        # ---------------------------------------------------------------
+        - name: AI impact analysis
+          block:
+            - name: Build impact analysis prompt
+              ansible.builtin.set_fact:
+                impact_prompt: |
+                  You are an IT operations analyst. A Windows IIS SSL/TLS certificate is about to be rotated automatically by Event-Driven Ansible.
+
+                  Certificate details:
+                  - Subject: CN={{ cert_dns_name }}
+                  - Thumbprint: {{ cert_thumbprint }}
+                  - Host: {{ inventory_hostname }}
+                  - Store: {{ cert_store_location }}\{{ cert_store_name }}
+                  - Service: IIS ({{ iis_site_name }}) HTTPS on port {{ iis_https_port }}
+                  - Days until expiry: {{ days_left | default('< 7') }}
+
+                  Provide a brief impact analysis (3-5 sentences):
+                  1. What services depend on this certificate?
+                  2. What is the risk of rotating it now?
+                  3. What is the risk of NOT rotating it?
+                  4. Recommendation: proceed or delay?
+              delegate_to: localhost
+
+            - name: Call AI for impact analysis
+              ansible.builtin.uri:
+                url: "{{ llm_api_url }}"
+                method: POST
+                headers:
+                  x-api-key: "{{ anthropic_api_key }}"
+                  anthropic-version: "2023-06-01"
+                  Content-Type: "application/json"
+                body_format: json
+                body:
+                  model: "{{ llm_model }}"
+                  max_tokens: "{{ llm_max_tokens }}"
+                  messages:
+                    - role: user
+                      content: "{{ impact_prompt }}"
+                return_content: true
+                status_code: 200
+                timeout: 30
+              delegate_to: localhost
+              register: ai_impact_response
+
+            - name: Parse AI impact analysis
+              ansible.builtin.set_fact:
+                ai_impact_analysis: "{{ ai_impact_response.json.content[0].text }}"
+              delegate_to: localhost
+
+            - name: Display AI impact analysis
+              ansible.builtin.debug:
+                msg: "{{ ai_impact_analysis }}"
+
+            - name: Create ServiceNow incident with AI impact analysis
+              servicenow.itsm.incident:
+                instance:
+                  host: "https://{{ snow_instance }}"
+                  username: "{{ snow_username }}"
+                  password: "{{ snow_password }}"
+                state: new
+                short_description: "Certificate expiring on {{ inventory_hostname }} - automated rotation initiated"
+                description: |
+                  Event-Driven Ansible detected an expiring SSL/TLS certificate and initiated automated rotation.
+
+                  Certificate: CN={{ cert_dns_name }}
+                  Thumbprint: {{ cert_thumbprint }}
+                  Host: {{ inventory_hostname }}
+                  Service: IIS HTTPS ({{ iis_site_name }})
+
+                  --- AI Impact Analysis ---
+                  {{ ai_impact_analysis }}
+                impact: medium
+                urgency: medium
+                caller: "Event-Driven Ansible"
+                other:
+                  category: "Software"
+                  subcategory: "Certificate Management"
+              delegate_to: localhost
+              register: snow_incident
+
+            - name: Set ServiceNow incident number
+              ansible.builtin.set_fact:
+                snow_incident_number: "{{ snow_incident.record.number }}"
+                snow_incident_sys_id: "{{ snow_incident.record.sys_id }}"
+              delegate_to: localhost
+
+            - name: Display ServiceNow incident
+              ansible.builtin.debug:
+                msg: "ServiceNow incident created: {{ snow_incident_number }}"
+
+          rescue:
+            - name: AI/ServiceNow pre-rotation step failed (continuing with rotation)
+              ansible.builtin.debug:
+                msg: "AI impact analysis or ServiceNow creation failed: {{ ansible_failed_result.msg | default('Unknown error') }}. Continuing with rotation."
+
+            - name: Set empty SNOW facts on failure
+              ansible.builtin.set_fact:
+                snow_incident_number: ""
+                snow_incident_sys_id: ""
+                ai_impact_analysis: "Skipped (AI call failed)"
+              delegate_to: localhost
+
+        # ---------------------------------------------------------------
+        # Act 2: Deterministic Certificate Rotation
+        # ---------------------------------------------------------------
         - name: Find replacement certificate
           ansible.windows.win_shell: |
             $certs = Get-ChildItem Cert:\LocalMachine\My | Where-Object {
@@ -82,6 +193,96 @@
             that: verify_result.status_code == 200
             success_msg: "IIS is serving HTTPS with the new certificate!"
             fail_msg: "IIS HTTPS check failed after certificate rotation"
+
+        # ---------------------------------------------------------------
+        # Act 3: AI Change Summary + ServiceNow Update (post-rotation)
+        # ---------------------------------------------------------------
+        - name: AI change summary
+          block:
+            - name: Build change summary prompt
+              ansible.builtin.set_fact:
+                summary_prompt: |
+                  You are an IT change management analyst. An automated certificate rotation just completed successfully. Generate a formal change summary suitable for a change management record.
+
+                  Change details:
+                  - Host: {{ inventory_hostname }}
+                  - Service: IIS ({{ iis_site_name }}) HTTPS on port {{ iis_https_port }}
+                  - Old certificate thumbprint: {{ cert_thumbprint }} (removed)
+                  - New certificate thumbprint: {{ new_cert_thumbprint }} (now active)
+                  - Certificate subject: CN={{ cert_dns_name }}
+                  - HTTPS verification: passed (status {{ verify_result.status_code }})
+                  - Performed by: Event-Driven Ansible (automated)
+                  - Trigger: Certificate expiry event via EDA webhook
+
+                  Write a concise change summary (5-8 sentences) covering:
+                  1. What changed
+                  2. Why it changed
+                  3. How it was changed (automation method)
+                  4. Verification performed
+                  5. Impact to end users (expected: none)
+              delegate_to: localhost
+
+            - name: Call AI for change summary
+              ansible.builtin.uri:
+                url: "{{ llm_api_url }}"
+                method: POST
+                headers:
+                  x-api-key: "{{ anthropic_api_key }}"
+                  anthropic-version: "2023-06-01"
+                  Content-Type: "application/json"
+                body_format: json
+                body:
+                  model: "{{ llm_model }}"
+                  max_tokens: "{{ llm_max_tokens }}"
+                  messages:
+                    - role: user
+                      content: "{{ summary_prompt }}"
+                return_content: true
+                status_code: 200
+                timeout: 30
+              delegate_to: localhost
+              register: ai_summary_response
+
+            - name: Parse AI change summary
+              ansible.builtin.set_fact:
+                ai_change_summary: "{{ ai_summary_response.json.content[0].text }}"
+              delegate_to: localhost
+
+            - name: Display AI change summary
+              ansible.builtin.debug:
+                msg: "{{ ai_change_summary }}"
+
+            - name: Update ServiceNow incident with change summary and resolve
+              servicenow.itsm.incident:
+                instance:
+                  host: "https://{{ snow_instance }}"
+                  username: "{{ snow_username }}"
+                  password: "{{ snow_password }}"
+                sys_id: "{{ snow_incident_sys_id }}"
+                state: resolved
+                close_code: "Solved (Permanently)"
+                close_notes: |
+                  Certificate rotation completed successfully by Event-Driven Ansible.
+
+                  Old cert: {{ cert_thumbprint }}
+                  New cert: {{ new_cert_thumbprint }}
+                  HTTPS verification: PASSED
+
+                  --- AI Change Summary ---
+                  {{ ai_change_summary }}
+                other:
+                  work_notes: "{{ ai_change_summary }}"
+              delegate_to: localhost
+              when: snow_incident_sys_id | default('') | length > 0
+
+            - name: Display final status
+              ansible.builtin.debug:
+                msg: "Certificate rotation complete. ServiceNow incident {{ snow_incident_number }} resolved."
+
+          rescue:
+            - name: AI/ServiceNow post-rotation step failed
+              ansible.builtin.debug:
+                msg: "AI change summary or ServiceNow update failed: {{ ansible_failed_result.msg | default('Unknown error') }}. Rotation itself succeeded."
 
         - name: Certificate rotation complete
           ansible.builtin.debug:

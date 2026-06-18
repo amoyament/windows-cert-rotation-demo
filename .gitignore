@@ -5,3 +5,5 @@ vars/cert_thumbprints.yml
 __pycache__/
 *.pyc
 .DS_Store
+discovery_report.txt
+.env
