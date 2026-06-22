@@ -18,3 +18,4 @@
               target_host: "{{ event.payload.host }}"
               cert_thumbprint: "{{ event.payload.thumbprint }}"
               days_left: "{{ event.payload.days_left }}"
+              additional_context: "{{ event.payload.additional_context | default('None provided.') }}"
