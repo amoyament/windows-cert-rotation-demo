@@ -1,9 +1,11 @@
 *.pem
 .env.demo
 vars/cert_thumbprints.yml
+inventory/hosts.yml
 *.retry
 __pycache__/
 *.pyc
 .DS_Store
 discovery_report.txt
 .env
+scripts/fix_eda_mapping.sh

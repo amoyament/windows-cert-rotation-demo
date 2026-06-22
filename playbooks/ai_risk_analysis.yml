@@ -10,9 +10,9 @@
     vertex_api_url: "https://{{ vertex_region }}-aiplatform.googleapis.com/v1/projects/{{ vertex_project }}/locations/{{ vertex_region }}/publishers/anthropic/models/{{ vertex_model }}:rawPredict"
     snow_username: "{{ lookup('env', 'SN_USERNAME') | default('***REDACTED***', true) }}"
     snow_password: "{{ lookup('env', 'SN_PASSWORD') | default('***REDACTED***', true) }}"
-    aap_hostname: "{{ lookup('env', 'AAP_HOSTNAME') }}"
-    aap_username: "{{ lookup('env', 'AAP_USERNAME') }}"
-    aap_password: "{{ lookup('env', 'AAP_PASSWORD') }}"
+    aap_hostname: "{{ lookup('env', 'CONTROLLER_HOST') | default(lookup('env', 'AAP_HOSTNAME'), true) | regex_replace('^https?://', '') | regex_replace('/.*$', '') }}"
+    aap_username: "{{ lookup('env', 'CONTROLLER_USERNAME') | default(lookup('env', 'AAP_USERNAME'), true) }}"
+    aap_password: "{{ lookup('env', 'CONTROLLER_PASSWORD') | default(lookup('env', 'AAP_PASSWORD'), true) }}"
     maintenance_window_day: 5
     maintenance_window_hour_utc: 6
 
@@ -26,15 +26,50 @@
         # ---------------------------------------------------------------
         # AI Risk Assessment
         # ---------------------------------------------------------------
-        - name: Get Google Cloud access token
-          ansible.builtin.command:
-            cmd: gcloud auth print-access-token
-          register: gcloud_token_result
+        - name: Generate signed JWT for Google Cloud authentication
+          ansible.builtin.shell: |
+            python3 << 'PYEOF'
+            import json, time, base64, os
+            from cryptography.hazmat.primitives import serialization, hashes
+            from cryptography.hazmat.primitives.asymmetric import padding
+            sa_file = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', '')
+            with open(sa_file) as f:
+                sa_info = json.load(f)
+            key = serialization.load_pem_private_key(sa_info['private_key'].encode(), password=None)
+            now = int(time.time())
+            def b64url(data):
+                return base64.urlsafe_b64encode(json.dumps(data).encode()).rstrip(b'=')
+            header = b64url({"alg": "RS256", "typ": "JWT"})
+            claims = b64url({
+                "iss": sa_info['client_email'],
+                "scope": "https://www.googleapis.com/auth/cloud-platform",
+                "aud": "https://oauth2.googleapis.com/token",
+                "iat": now, "exp": now + 3600
+            })
+            signing_input = header + b'.' + claims
+            sig = base64.urlsafe_b64encode(
+                key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+            ).rstrip(b'=')
+            print((signing_input + b'.' + sig).decode())
+            PYEOF
+          register: jwt_result
           changed_when: false
+
+        - name: Exchange JWT for Google Cloud access token
+          ansible.builtin.uri:
+            url: "https://oauth2.googleapis.com/token"
+            method: POST
+            body_format: form-urlencoded
+            body:
+              grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer"
+              assertion: "{{ jwt_result.stdout | trim }}"
+            return_content: true
+            status_code: 200
+          register: gcp_token_result
 
         - name: Set access token fact
           ansible.builtin.set_fact:
-            gcp_access_token: "{{ gcloud_token_result.stdout | trim }}"
+            gcp_access_token: "{{ gcp_token_result.json.access_token }}"
 
         - name: Capture current timestamp for timing analysis
           ansible.builtin.command:
@@ -45,7 +80,7 @@
         - name: Build risk assessment prompt
           ansible.builtin.set_fact:
             assessment_prompt: |
-              You are a senior IT operations analyst integrated into an Event-Driven Ansible automation pipeline. Your role is to evaluate whether an automated certificate rotation should proceed immediately, be delayed to a maintenance window, or be escalated for manual review.
+              You are a senior IT operations analyst integrated into an Event-Driven Ansible automation pipeline. Your role is to evaluate whether an automated certificate rotation should proceed immediately, be scheduled for a maintenance window, or be escalated for manual review.
 
               You MUST respond with valid JSON only. No markdown, no code fences, no extra text.
 
@@ -106,12 +141,12 @@
               - The current time falls WITHIN the maintenance window (Saturday 02:00-06:00 US-Eastern), regardless of days remaining
               - The certificate will expire BEFORE the next available maintenance window (no safe window left to delay to)
               - The current time is OUTSIDE peak business hours AND the dependency risk is manageable
-              - A previous DELAY decision was made but the certificate is now critically close to expiry
+              - A previous SCHEDULE decision was made but the certificate is now critically close to expiry
 
               ADDITIONAL CONTEXT:
               {{ additional_context | default('None provided.') }}
 
-              DELAY when:
+              SCHEDULE when:
               - The current time is DURING peak business hours (07:00-19:00 US-Eastern) AND a maintenance window is available before the certificate expires
               - High-risk upstream dependencies (F5 health monitors, ARR) would be impacted AND a safer window exists within the expiry timeline
               - The days remaining provide enough buffer to wait for the next maintenance window with at least 1 day of margin
@@ -123,12 +158,12 @@
 
               Respond with this exact JSON structure:
               {
-                "decision": "proceed | delay | escalate",
+                "decision": "proceed | schedule | escalate",
                 "risk_level": "CRITICAL | HIGH | MEDIUM | LOW",
                 "rationale": "2-3 sentence explanation of why this decision was made",
                 "impact_analysis": "Detailed multi-paragraph analysis covering: dependency impact, compliance implications, timing considerations, and historical risk factors. Reference specific systems and incidents from the context provided.",
                 "precautions": ["list", "of", "specific", "precautions", "to", "take"],
-                "scheduled_window": "Only if decision is delay: the recommended maintenance window to execute",
+                "scheduled_window": "Only if decision is schedule: the recommended maintenance window to execute",
                 "escalation_contacts": "Only if decision is escalate: who should review and why"
               }
 
@@ -226,7 +261,7 @@
         # Decision Gate
         # ---------------------------------------------------------------
 
-        # --- Look up rotation job template (needed for PROCEED and DELAY) ---
+        # --- Look up rotation job template (needed for PROCEED and SCHEDULE) ---
         - name: Look up rotation job template
           ansible.builtin.uri:
             url: "https://{{ aap_hostname }}/api/controller/v2/job_templates/?name={{ rotation_job_template_name | urlencode }}"
@@ -236,12 +271,12 @@
             force_basic_auth: yes
             validate_certs: false
           register: jt_lookup
-          when: ai_decision.decision in ['proceed', 'delay']
+          when: ai_decision.decision in ['proceed', 'schedule']
 
         - name: Set rotation job template ID
           ansible.builtin.set_fact:
             rotation_jt_id: "{{ jt_lookup.json.results[0].id }}"
-          when: ai_decision.decision in ['proceed', 'delay']
+          when: ai_decision.decision in ['proceed', 'schedule']
 
         # --- PROCEED PATH ---
         - name: Handle PROCEED decision
@@ -295,14 +330,14 @@
                     The rotation playbook will update this incident upon completion.
           when: ai_decision.decision == "proceed"
 
-        # --- DELAY PATH ---
-        - name: Handle DELAY decision
+        # --- SCHEDULE PATH ---
+        - name: Handle SCHEDULE decision
           block:
-            - name: Rotation delayed by AI recommendation
+            - name: Rotation scheduled by AI recommendation
               ansible.builtin.debug:
                 msg:
-                  - "AI recommends DELAY. Rotation will not proceed now."
-                  - "Scheduling for next maintenance window: {{ service_context.maintenance_window }}"
+                  - "AI recommends SCHEDULE. Rotation will run during next maintenance window."
+                  - "Maintenance window: {{ service_context.maintenance_window }}"
                   - "Rationale: {{ ai_decision.rationale }}"
 
             - name: Calculate next maintenance window start time
@@ -335,7 +370,7 @@
                 validate_certs: false
                 body_format: json
                 body:
-                  name: "Delayed cert rotation - {{ cert_thumbprint[:12] }}"
+                  name: "Scheduled cert rotation - {{ cert_thumbprint[:12] }}"
                   rrule: "DTSTART:{{ scheduled_rotation_time }} RRULE:FREQ=MINUTELY;INTERVAL=1;COUNT=1"
                   extra_data:
                     cert_thumbprint: "{{ cert_thumbprint }}"
@@ -353,7 +388,7 @@
               ansible.builtin.debug:
                 msg:
                   - "Rotation scheduled in AAP for: {{ scheduled_rotation_time }}"
-                  - "Schedule name: Delayed cert rotation - {{ cert_thumbprint[:12] }}"
+                  - "Schedule name: Scheduled cert rotation - {{ cert_thumbprint[:12] }}"
                   - "The rotation job will execute automatically during the maintenance window."
 
             - name: Update ServiceNow incident with scheduled rotation
@@ -366,12 +401,12 @@
                 state: in_progress
                 other:
                   work_notes: |
-                    AI DECISION: DELAY
+                    AI DECISION: SCHEDULE
                     Rotation scheduled in AAP for maintenance window: {{ scheduled_rotation_time }}
                     Rationale: {{ ai_decision.rationale }}
                     Certificate expires in {{ days_left | default('< 7') }} days.
                     Job template "{{ rotation_job_template_name }}" will execute automatically at the scheduled time.
-          when: ai_decision.decision == "delay"
+          when: ai_decision.decision == "schedule"
 
         # --- ESCALATE PATH ---
         - name: Handle ESCALATE decision
@@ -409,39 +444,43 @@
             msg: "Risk analysis complete. Decision: {{ ai_decision.decision | upper }}. ServiceNow: {{ snow_incident_number }}"
 
       rescue:
-        - name: Risk analysis failed, launching rotation directly
+        - name: AI risk analysis failed, escalating for human review
           ansible.builtin.debug:
-            msg: "AI risk analysis failed: {{ ansible_failed_result.msg | default('Unknown error') }}. Launching rotation directly as failsafe."
+            msg: "AI risk analysis failed: {{ ansible_failed_result.msg | default('Unknown error') }}. Escalating for human review."
 
-        - name: Look up rotation job template for failsafe launch
-          ansible.builtin.uri:
-            url: "https://{{ aap_hostname }}/api/controller/v2/job_templates/?name={{ rotation_job_template_name | urlencode }}"
-            method: GET
-            user: "{{ aap_username }}"
-            password: "{{ aap_password }}"
-            force_basic_auth: yes
-            validate_certs: false
-          register: jt_failsafe_lookup
+        - name: Create ServiceNow incident for AI-unavailable escalation
+          servicenow.itsm.incident:
+            instance:
+              host: "https://{{ snow_instance }}"
+              username: "{{ snow_username }}"
+              password: "{{ snow_password }}"
+            state: new
+            short_description: >-
+              [ESCALATE] Certificate expiring in {{ days_left | default('< 7') }} days on {{ target_host }} (AI service unavailable)
+            description: |
+              Event-Driven Ansible detected an expiring SSL/TLS certificate, but the AI risk
+              analysis service is unavailable. Manual review is required.
 
-        - name: Launch rotation as failsafe
-          ansible.builtin.uri:
-            url: "https://{{ aap_hostname }}/api/controller/v2/job_templates/{{ jt_failsafe_lookup.json.results[0].id }}/launch/"
-            method: POST
-            user: "{{ aap_username }}"
-            password: "{{ aap_password }}"
-            force_basic_auth: yes
-            validate_certs: false
-            body_format: json
-            body:
-              extra_vars:
-                cert_thumbprint: "{{ cert_thumbprint }}"
-                target_host: "{{ target_host }}"
-                days_left: "{{ days_left }}"
-            status_code:
-              - 200
-              - 201
-          register: failsafe_launch
+              Certificate: CN={{ cert_dns_name }}
+              Thumbprint: {{ cert_thumbprint }}
+              Host: {{ target_host }}
+              Service: IIS HTTPS ({{ iis_site_name }})
+              Days until expiry: {{ days_left | default('< 7') }}
 
-        - name: Display failsafe launch
+              AI service error: {{ ansible_failed_result.msg | default('Unknown error') }}
+
+              ACTION REQUIRED: Review this certificate rotation and launch the
+              "Rotate Windows Certificate" job template manually when ready.
+            impact: high
+            urgency: high
+            caller: "{{ snow_username }}"
+            other:
+              category: "Software"
+              subcategory: "Certificate Management"
+          register: failsafe_snow_incident
+
+        - name: Display failsafe escalation
           ansible.builtin.debug:
-            msg: "Failsafe rotation launched. Job ID: {{ failsafe_launch.json.id }}"
+            msg:
+              - "Escalated to human review. ServiceNow: {{ failsafe_snow_incident.record.number }}"
+              - "AI service unavailable. Manual review required before rotation."

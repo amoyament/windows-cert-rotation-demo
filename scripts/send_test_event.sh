@@ -22,7 +22,7 @@ echo "  Event Stream URL: ${EDA_EVENT_STREAM_URL}"
 echo "  Host: ${WINDOWS_PRIVATE_IP}"
 echo "  Thumbprint: ${OLD_THUMBPRINT}"
 
-curl -s -X POST "${EDA_EVENT_STREAM_URL}" \
+curl -sk -X POST "${EDA_EVENT_STREAM_URL}" \
   -u "${EDA_WEBHOOK_USER:-webhook}:${EDA_WEBHOOK_PASS:-Demo-EDA-Cert-2026!}" \
   -H "Content-Type: application/json" \
   -d "{

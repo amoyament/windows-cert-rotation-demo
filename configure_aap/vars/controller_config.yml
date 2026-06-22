@@ -1,4 +1,23 @@
 ---
+controller_credential_types:
+  - name: "GCP Service Account"
+    description: "Writes service account JSON to a temp file and sets GOOGLE_APPLICATION_CREDENTIALS"
+    kind: "cloud"
+    inputs:
+      fields:
+        - id: gcp_service_account_json
+          type: string
+          label: "GCP Service Account JSON"
+          secret: true
+          multiline: true
+      required:
+        - gcp_service_account_json
+    injectors:
+      file:
+        template: "{{ '{{' }} gcp_service_account_json {{ '}}' }}"
+      env:
+        GOOGLE_APPLICATION_CREDENTIALS: "{{ '{{' }} tower.filename {{ '}}' }}"
+
 controller_credentials:
   - name: "Windows Demo Credential"
     description: "Machine credential for Windows cert rotation demo"
@@ -7,6 +26,13 @@ controller_credentials:
     inputs:
       username: "Administrator"
       password: "{{ windows_admin_password }}"
+
+  - name: "GCP Service Account Credential"
+    description: "Service account key for Vertex AI access"
+    organization: "Default"
+    credential_type: "GCP Service Account"
+    inputs:
+      gcp_service_account_json: "{{ lookup('env', 'GCP_SERVICE_ACCOUNT_JSON') }}"
 
 controller_inventories:
   - name: "Windows Demo Inventory"
@@ -41,13 +67,14 @@ controller_projects:
 
 controller_templates:
   - name: "AI Certificate Risk Analysis"
-    description: "AI-powered risk analysis that decides whether to proceed, delay, or escalate certificate rotation"
+    description: "AI-powered risk analysis that decides whether to proceed, schedule, or escalate certificate rotation"
     organization: "Default"
     project: "Windows Cert Rotation"
     playbook: "playbooks/ai_risk_analysis.yml"
     inventory: "Windows Demo Inventory"
     credentials:
       - "Windows Demo Credential"
+      - "GCP Service Account Credential"
     ask_variables_on_launch: true
     extra_vars:
       cert_dns_name: "demo.contoso.com"
