@@ -35,6 +35,8 @@
             sa_file = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', '')
             with open(sa_file) as f:
                 sa_info = json.load(f)
+            if isinstance(sa_info, str):
+                sa_info = json.loads(sa_info)
             key = serialization.load_pem_private_key(sa_info['private_key'].encode(), password=None)
             now = int(time.time())
             def b64url(data):
