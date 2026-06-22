@@ -20,13 +20,15 @@
           - lookup('env', 'AAP_USERNAME') | length > 0
           - lookup('env', 'AAP_PASSWORD') | length > 0
           - lookup('env', 'AAP_PROTOCOL') | length > 0
+          - lookup('env', 'GCP_SERVICE_ACCOUNT_JSON') | length > 0
         fail_msg: |
-          Missing required AAP environment variables. Please set:
+          Missing required environment variables. Please set:
             export AAP_HOSTNAME="aap-nostromo.demoredhat.com"
             export AAP_USERNAME="atrotter"
             export AAP_PASSWORD="your-password"
             export AAP_PROTOCOL="http"
             export AAP_VALIDATE_CERTS="false"
+            export GCP_SERVICE_ACCOUNT_JSON="$(cat path/to/service-account-key.json)"
 
     - name: Assert .env.demo exists
       ansible.builtin.stat:
@@ -120,6 +122,98 @@
             cred_result.json.id
             if existing_cred.json.count == 0
             else existing_cred.json.results[0].id
+          }}
+
+    # ---------------------------------------------------------------
+    # GCP Service Account Custom Credential Type + Credential
+    # ---------------------------------------------------------------
+    - name: Get existing GCP Service Account credential type
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/credential_types/?name=GCP+Service+Account"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+      register: existing_gcp_cred_type
+
+    - name: Create GCP Service Account credential type
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/credential_types/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body:
+          name: "GCP Service Account"
+          description: "Writes service account JSON to a temp file and sets GOOGLE_APPLICATION_CREDENTIALS"
+          kind: "cloud"
+          inputs:
+            fields:
+              - id: gcp_service_account_json
+                type: string
+                label: "GCP Service Account JSON"
+                secret: true
+                multiline: true
+            required:
+              - gcp_service_account_json
+          injectors:
+            file:
+              template: "{{ '{{' }} gcp_service_account_json {{ '}}' }}"
+            env:
+              GOOGLE_APPLICATION_CREDENTIALS: "{{ '{{' }} tower.filename {{ '}}' }}"
+        status_code: [200, 201]
+      register: gcp_cred_type_result
+      when: existing_gcp_cred_type.json.count == 0
+
+    - name: Set GCP credential type ID fact
+      ansible.builtin.set_fact:
+        gcp_cred_type_id: >-
+          {{
+            gcp_cred_type_result.json.id
+            if existing_gcp_cred_type.json.count == 0
+            else existing_gcp_cred_type.json.results[0].id
+          }}
+
+    - name: Get existing GCP Service Account credential
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/credentials/?name=GCP+Service+Account+Credential"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+      register: existing_gcp_cred
+
+    - name: Create GCP Service Account credential
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/credentials/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body:
+          name: "GCP Service Account Credential"
+          description: "Service account key for Vertex AI access"
+          organization: 1
+          credential_type: "{{ gcp_cred_type_id }}"
+          inputs:
+            gcp_service_account_json: "{{ lookup('env', 'GCP_SERVICE_ACCOUNT_JSON') | to_json }}"
+        status_code: [200, 201]
+      register: gcp_cred_result
+      when: existing_gcp_cred.json.count == 0
+
+    - name: Set GCP credential ID fact
+      ansible.builtin.set_fact:
+        gcp_cred_id: >-
+          {{
+            gcp_cred_result.json.id
+            if existing_gcp_cred.json.count == 0
+            else existing_gcp_cred.json.results[0].id
           }}
 
     # ---------------------------------------------------------------
@@ -363,6 +457,148 @@
       failed_when: false
 
     # ---------------------------------------------------------------
+    # AI Risk Analysis Job Template
+    # ---------------------------------------------------------------
+    - name: Get existing AI Certificate Risk Analysis job template
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/job_templates/?name=AI+Certificate+Risk+Analysis"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+      register: existing_ai_jt
+
+    - name: Create AI Certificate Risk Analysis job template
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/job_templates/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body:
+          name: "AI Certificate Risk Analysis"
+          description: "AI-powered risk analysis that decides whether to proceed, schedule, or escalate certificate rotation"
+          organization: 1
+          project: "{{ project_id }}"
+          playbook: "playbooks/ai_risk_analysis.yml"
+          inventory: "{{ inventory_id }}"
+          ask_variables_on_launch: true
+          extra_vars: "cert_dns_name: demo.contoso.com"
+        status_code: [200, 201]
+      register: ai_jt_result
+      when: existing_ai_jt.json.count == 0
+
+    - name: Set AI job template ID fact
+      ansible.builtin.set_fact:
+        ai_jt_id: >-
+          {{
+            ai_jt_result.json.id
+            if existing_ai_jt.json.count == 0
+            else existing_ai_jt.json.results[0].id
+          }}
+
+    - name: Associate Windows credential with AI job template
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/job_templates/{{ ai_jt_id }}/credentials/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body:
+          id: "{{ credential_id }}"
+        status_code: [200, 201, 204]
+      failed_when: false
+
+    - name: Associate GCP Service Account credential with AI job template
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/job_templates/{{ ai_jt_id }}/credentials/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body:
+          id: "{{ gcp_cred_id }}"
+        status_code: [200, 201, 204]
+      failed_when: false
+
+    - name: Look up Controller credential type
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/credential_types/?name=Red+Hat+Ansible+Automation+Platform"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+      register: controller_cred_type
+
+    - name: Set controller credential type ID
+      ansible.builtin.set_fact:
+        controller_cred_type_id: "{{ controller_cred_type.json.results[0].id }}"
+
+    - name: Create Controller API credential for job-to-job calls
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/credentials/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body:
+          name: "Controller API Credential"
+          description: "Allows job templates to call back to the controller API"
+          organization: 1
+          credential_type: "{{ controller_cred_type_id }}"
+          inputs:
+            host: "{{ aap_base_url }}"
+            username: "{{ aap_username }}"
+            password: "{{ aap_password }}"
+            verify_ssl: "false"
+        status_code: [200, 201, 400]
+      register: controller_api_cred
+      failed_when: false
+
+    - name: Look up Controller API credential if already exists
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/credentials/?name=Controller+API+Credential"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+      register: existing_controller_cred
+
+    - name: Set Controller API credential ID fact
+      ansible.builtin.set_fact:
+        controller_api_cred_id: >-
+          {{
+            controller_api_cred.json.id | default('')
+            if controller_api_cred.status in [200, 201]
+            else existing_controller_cred.json.results[0].id
+          }}
+
+    - name: Associate Controller API credential with AI job template
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/job_templates/{{ ai_jt_id }}/credentials/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body:
+          id: "{{ controller_api_cred_id }}"
+        status_code: [200, 201, 204]
+      failed_when: false
+
+    # ---------------------------------------------------------------
     # EDA Configuration
     # ---------------------------------------------------------------
     - name: Get AAP gateway auth token for EDA API
@@ -568,6 +804,20 @@
       ansible.builtin.set_fact:
         eda_rulebook_id: "{{ rulebook_result.json.results[0].id }}"
 
+    - name: Look up rulebook source names
+      ansible.builtin.uri:
+        url: "{{ eda_api }}/rulebooks/{{ eda_rulebook_id }}/sources/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ aap_token }}"
+        validate_certs: "{{ aap_validate_certs }}"
+      register: rulebook_sources
+
+    - name: Set rulebook source name and hash facts
+      ansible.builtin.set_fact:
+        eda_source_name: "{{ rulebook_sources.json.results[0].name }}"
+        eda_rulebook_hash: "{{ rulebook_sources.json.results[0].rulebook_hash }}"
+
     - name: Get existing AAP controller credential for EDA
       ansible.builtin.uri:
         url: "{{ eda_api }}/eda-credentials/?name=AAP+Controller+Credential"
@@ -636,6 +886,11 @@
           is_enabled: true
           eda_credentials:
             - "{{ aap_eda_cred_id }}"
+          source_mappings: >-
+            [{"source_name": "{{ eda_source_name }}",
+              "event_stream_id": {{ eda_stream_id }},
+              "event_stream_name": "Windows Cert Expiry Stream",
+              "rulebook_hash": "{{ eda_rulebook_hash }}"}]
         validate_certs: "{{ aap_validate_certs }}"
         status_code: [200, 201]
       when: existing_activation.json.count == 0
