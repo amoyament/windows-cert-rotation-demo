@@ -19,8 +19,6 @@
           - lookup('env', 'AAP_HOSTNAME') | length > 0
           - lookup('env', 'AAP_USERNAME') | length > 0
           - lookup('env', 'AAP_PASSWORD') | length > 0
-          - lookup('env', 'AAP_PROTOCOL') | length > 0
-          - lookup('env', 'GCP_SERVICE_ACCOUNT_JSON') | length > 0
         fail_msg: |
           Missing required environment variables. Please set:
             export AAP_HOSTNAME="your-aap-url.example.com"
@@ -126,7 +124,12 @@
 
     # ---------------------------------------------------------------
     # GCP Service Account Custom Credential Type + Credential
+    # (skipped when GCP_SERVICE_ACCOUNT_JSON is not set)
     # ---------------------------------------------------------------
+    - name: Check if GCP env var is set
+      ansible.builtin.set_fact:
+        gcp_json_available: "{{ lookup('env', 'GCP_SERVICE_ACCOUNT_JSON') | length > 0 }}"
+
     - name: Get existing GCP Service Account credential type
       ansible.builtin.uri:
         url: "{{ aap_api }}/credential_types/?name=GCP+Service+Account"
@@ -205,15 +208,17 @@
             gcp_service_account_json: "{{ lookup('env', 'GCP_SERVICE_ACCOUNT_JSON') | to_json }}"
         status_code: [200, 201]
       register: gcp_cred_result
-      when: existing_gcp_cred.json.count == 0
+      when:
+        - existing_gcp_cred.json.count == 0
+        - gcp_json_available | bool
 
     - name: Set GCP credential ID fact
       ansible.builtin.set_fact:
         gcp_cred_id: >-
           {{
             gcp_cred_result.json.id
-            if existing_gcp_cred.json.count == 0
-            else existing_gcp_cred.json.results[0].id
+            if (existing_gcp_cred.json.count == 0 and gcp_json_available | bool)
+            else existing_gcp_cred.json.results[0].id | default('')
           }}
 
     # ---------------------------------------------------------------
@@ -524,25 +529,79 @@
         validate_certs: "{{ aap_validate_certs }}"
         body_format: json
         body:
-          id: "{{ gcp_cred_id }}"
+          id: "{{ gcp_cred_id | int }}"
         status_code: [200, 201, 204]
       failed_when: false
+      when: gcp_cred_id | default('') | length > 0
 
-    - name: Look up Controller credential type
+    - name: Get existing Controller API credential type
       ansible.builtin.uri:
-        url: "{{ aap_api }}/credential_types/?name=Red+Hat+Ansible+Automation+Platform"
+        url: "{{ aap_api }}/credential_types/?name=Controller+API"
         method: GET
         user: "{{ aap_username }}"
         password: "{{ aap_password }}"
         force_basic_auth: yes
         validate_certs: "{{ aap_validate_certs }}"
-      register: controller_cred_type
+      register: existing_ctrl_cred_type
 
-    - name: Set controller credential type ID
+    - name: Create Controller API credential type
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/credential_types/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body:
+          name: "Controller API"
+          description: "Injects controller host, username, and password as env vars for job-to-job API calls"
+          kind: "cloud"
+          inputs:
+            fields:
+              - id: controller_host
+                type: string
+                label: "Controller Host URL"
+              - id: controller_username
+                type: string
+                label: "Controller Username"
+              - id: controller_password
+                type: string
+                label: "Controller Password"
+                secret: true
+            required:
+              - controller_host
+              - controller_username
+              - controller_password
+          injectors:
+            env:
+              CONTROLLER_HOST: "{{ '{{' }} controller_host {{ '}}' }}"
+              CONTROLLER_USERNAME: "{{ '{{' }} controller_username {{ '}}' }}"
+              CONTROLLER_PASSWORD: "{{ '{{' }} controller_password {{ '}}' }}"
+        status_code: [200, 201]
+      register: ctrl_cred_type_result
+      when: existing_ctrl_cred_type.json.count == 0
+
+    - name: Set Controller API credential type ID
       ansible.builtin.set_fact:
-        controller_cred_type_id: "{{ controller_cred_type.json.results[0].id }}"
+        ctrl_cred_type_id: >-
+          {{
+            ctrl_cred_type_result.json.id
+            if existing_ctrl_cred_type.json.count == 0
+            else existing_ctrl_cred_type.json.results[0].id
+          }}
 
-    - name: Create Controller API credential for job-to-job calls
+    - name: Get existing Controller API credential
+      ansible.builtin.uri:
+        url: "{{ aap_api }}/credentials/?name=Controller+API+Credential"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ aap_validate_certs }}"
+      register: existing_ctrl_cred
+
+    - name: Create Controller API credential
       ansible.builtin.uri:
         url: "{{ aap_api }}/credentials/"
         method: POST
@@ -555,33 +614,22 @@
           name: "Controller API Credential"
           description: "Allows job templates to call back to the controller API"
           organization: 1
-          credential_type: "{{ controller_cred_type_id }}"
+          credential_type: "{{ ctrl_cred_type_id }}"
           inputs:
-            host: "{{ aap_base_url }}"
-            username: "{{ aap_username }}"
-            password: "{{ aap_password }}"
-            verify_ssl: "false"
-        status_code: [200, 201, 400]
-      register: controller_api_cred
-      failed_when: false
-
-    - name: Look up Controller API credential if already exists
-      ansible.builtin.uri:
-        url: "{{ aap_api }}/credentials/?name=Controller+API+Credential"
-        method: GET
-        user: "{{ aap_username }}"
-        password: "{{ aap_password }}"
-        force_basic_auth: yes
-        validate_certs: "{{ aap_validate_certs }}"
-      register: existing_controller_cred
+            controller_host: "{{ aap_base_url }}"
+            controller_username: "{{ aap_username }}"
+            controller_password: "{{ aap_password }}"
+        status_code: [200, 201]
+      register: ctrl_cred_result
+      when: existing_ctrl_cred.json.count == 0
 
     - name: Set Controller API credential ID fact
       ansible.builtin.set_fact:
         controller_api_cred_id: >-
           {{
-            controller_api_cred.json.id | default('')
-            if controller_api_cred.status in [200, 201]
-            else existing_controller_cred.json.results[0].id
+            ctrl_cred_result.json.id
+            if existing_ctrl_cred.json.count == 0
+            else existing_ctrl_cred.json.results[0].id
           }}
 
     - name: Associate Controller API credential with AI job template
@@ -594,7 +642,7 @@
         validate_certs: "{{ aap_validate_certs }}"
         body_format: json
         body:
-          id: "{{ controller_api_cred_id }}"
+          id: "{{ controller_api_cred_id | int }}"
         status_code: [200, 201, 204]
       failed_when: false
 
