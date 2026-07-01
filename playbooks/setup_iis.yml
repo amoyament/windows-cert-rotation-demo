@@ -28,11 +28,114 @@
       ansible.windows.win_copy:
         content: |
           <!DOCTYPE html>
-          <html>
-          <head><title>Certificate Rotation Demo</title></head>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Contoso Corp</title>
+            <style>
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background: #f4f6f9;
+                color: #2d3436;
+                min-height: 100vh;
+              }
+              header {
+                background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+                color: white;
+                padding: 1rem 2rem;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+              }
+              header h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: 0.5px; }
+              nav a {
+                color: rgba(255,255,255,0.8);
+                text-decoration: none;
+                margin-left: 1.5rem;
+                font-size: 0.9rem;
+              }
+              nav a:hover { color: white; }
+              .hero {
+                background: linear-gradient(135deg, #0a3d62 0%, #3c6382 100%);
+                color: white;
+                padding: 3rem 2rem;
+                text-align: center;
+              }
+              .hero h2 { font-size: 1.8rem; margin-bottom: 0.5rem; font-weight: 300; }
+              .hero p { font-size: 1rem; opacity: 0.85; max-width: 600px; margin: 0 auto; }
+              .content { max-width: 960px; margin: 2rem auto; padding: 0 1.5rem; }
+              .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; margin-top: 1.5rem; }
+              .card {
+                background: white;
+                border-radius: 8px;
+                padding: 1.5rem;
+                box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+                border-top: 3px solid #0a3d62;
+              }
+              .card h3 { font-size: 1rem; margin-bottom: 0.5rem; color: #0a3d62; }
+              .card p { font-size: 0.85rem; color: #636e72; line-height: 1.5; }
+              .status-bar {
+                background: white;
+                border-radius: 8px;
+                padding: 1.25rem 1.5rem;
+                box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+                display: flex;
+                align-items: center;
+                gap: 0.75rem;
+                border-left: 4px solid #27ae60;
+              }
+              .status-dot {
+                width: 10px; height: 10px;
+                background: #27ae60;
+                border-radius: 50%;
+                display: inline-block;
+              }
+              .status-bar span { font-size: 0.9rem; color: #2d3436; }
+              footer {
+                text-align: center;
+                padding: 2rem;
+                font-size: 0.8rem;
+                color: #b2bec3;
+              }
+            </style>
+          </head>
           <body>
-            <h1>Certificate Rotation Demo</h1>
-            <p>Protected by auto-rotating TLS via Red Hat AAP and EDA</p>
+            <header>
+              <h1>CONTOSO CORP</h1>
+              <nav>
+                <a href="#">Dashboard</a>
+                <a href="#">Services</a>
+                <a href="#">Support</a>
+              </nav>
+            </header>
+            <div class="hero">
+              <h2>Internal Services Portal</h2>
+              <p>Secure access to corporate applications and infrastructure services</p>
+            </div>
+            <div class="content">
+              <div class="status-bar">
+                <span class="status-dot"></span>
+                <span>All systems operational &mdash; TLS certificates managed by Red Hat Ansible Automation Platform</span>
+              </div>
+              <div class="cards">
+                <div class="card">
+                  <h3>Employee Portal</h3>
+                  <p>Access HR self-service, benefits enrollment, and company directory.</p>
+                </div>
+                <div class="card">
+                  <h3>DevOps Pipeline</h3>
+                  <p>CI/CD dashboards, deployment status, and infrastructure monitoring.</p>
+                </div>
+                <div class="card">
+                  <h3>IT Service Desk</h3>
+                  <p>Submit tickets, check request status, and browse the knowledge base.</p>
+                </div>
+              </div>
+            </div>
+            <footer>Contoso Corporation. Internal use only.</footer>
           </body>
           </html>
         dest: C:\inetpub\wwwroot\index.html
@@ -42,11 +145,12 @@
         $cert = New-SelfSignedCertificate `
           -DnsName "{{ cert_dns_name }}" `
           -CertStoreLocation "Cert:\LocalMachine\My" `
+          -NotBefore (Get-Date).AddMonths(-11) `
           -NotAfter (Get-Date).AddMinutes({{ demo_cert_validity_minutes }}) `
           -KeyExportPolicy Exportable `
           -KeySpec KeyExchange `
           -KeyLength 2048 `
-          -FriendlyName "Demo Cert - Expiring Soon"
+          -FriendlyName "{{ cert_dns_name }}"
         Write-Output $cert.Thumbprint
       register: old_cert_result
 
@@ -59,11 +163,12 @@
         $cert = New-SelfSignedCertificate `
           -DnsName "{{ cert_dns_name }}" `
           -CertStoreLocation "Cert:\LocalMachine\My" `
+          -NotBefore (Get-Date).AddDays(-3) `
           -NotAfter (Get-Date).AddYears({{ replacement_cert_validity_years }}) `
           -KeyExportPolicy Exportable `
           -KeySpec KeyExchange `
           -KeyLength 2048 `
-          -FriendlyName "Demo Cert - Renewed"
+          -FriendlyName "{{ cert_dns_name }}"
         Write-Output $cert.Thumbprint
       register: new_cert_result
 

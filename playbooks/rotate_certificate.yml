@@ -105,19 +105,12 @@
             state: resolved
             close_code: "Solved (Permanently)"
             close_notes: |
-              Certificate rotation completed successfully by Event-Driven Ansible.
-
+              ROTATION COMPLETE
+              Old cert: {{ cert_thumbprint }} (removed)
+              New cert: {{ new_cert_thumbprint }} (now active)
               Host: {{ inventory_hostname }}
               Service: IIS ({{ iis_site_name }}) HTTPS on port {{ iis_https_port }}
-              Old certificate: {{ cert_thumbprint }} (removed)
-              New certificate: {{ new_cert_thumbprint }} (now active)
               HTTPS verification: PASSED (status {{ verify_result.status_code }})
-            other:
-              work_notes: |
-                ROTATION COMPLETE
-                Old cert: {{ cert_thumbprint }}
-                New cert: {{ new_cert_thumbprint }}
-                HTTPS status: {{ verify_result.status_code }}
           delegate_to: localhost
           when: snow_incident_sys_id | default('') | length > 0
 
