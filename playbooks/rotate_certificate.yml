@@ -5,8 +5,8 @@
   vars_files:
     - ../vars/demo_vars.yml
   vars:
-    snow_username: "{{ lookup('env', 'SN_USERNAME') | default('***REDACTED***', true) }}"
-    snow_password: "{{ lookup('env', 'SN_PASSWORD') | default('***REDACTED***', true) }}"
+    snow_username: "{{ lookup('env', 'SN_USERNAME') }}"
+    snow_password: "{{ lookup('env', 'SN_PASSWORD') }}"
 
   tasks:
     - name: Start certificate rotation on {{ inventory_hostname }}

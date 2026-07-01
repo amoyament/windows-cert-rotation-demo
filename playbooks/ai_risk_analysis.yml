@@ -8,8 +8,8 @@
   vars:
     rotation_job_template_name: "Rotate Windows Certificate"
     vertex_api_url: "https://{{ vertex_region }}-aiplatform.googleapis.com/v1/projects/{{ vertex_project }}/locations/{{ vertex_region }}/publishers/anthropic/models/{{ vertex_model }}:rawPredict"
-    snow_username: "{{ lookup('env', 'SN_USERNAME') | default('***REDACTED***', true) }}"
-    snow_password: "{{ lookup('env', 'SN_PASSWORD') | default('***REDACTED***', true) }}"
+    snow_username: "{{ lookup('env', 'SN_USERNAME') }}"
+    snow_password: "{{ lookup('env', 'SN_PASSWORD') }}"
     aap_hostname: "{{ lookup('env', 'CONTROLLER_HOST') | default(lookup('env', 'AAP_HOSTNAME'), true) | regex_replace('^https?://', '') | regex_replace('/.*$', '') }}"
     aap_username: "{{ lookup('env', 'CONTROLLER_USERNAME') | default(lookup('env', 'AAP_USERNAME'), true) }}"
     aap_password: "{{ lookup('env', 'CONTROLLER_PASSWORD') | default(lookup('env', 'AAP_PASSWORD'), true) }}"
